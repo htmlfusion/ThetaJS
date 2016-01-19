@@ -1,1 +1,137 @@
 #!/usr/bin/env node
+var program = require('commander');
+var theta = require('../index');
+var q = require('q');
+var fs = require('fs');
+var path = require('path');
+var exec = require('child_process').exec;
+var sys = require('sys');
+
+program
+  .version('0.0.1')
+  .option('--hdr', 'Capture hdr')
+  .option('--out [out]', 'Output location')
+  .option('--file [file]', 'File base name')
+  .parse(process.argv);
+
+var setShutter = function(speed) {
+  console.log('Setting shutter: '+ speed);
+  return theta.camera.setOptions(theta.sessionId, {
+    exposureProgram: theta.exposureProgram.MANUAL,
+    iso: 100,
+    shutterSpeed: speed
+  });
+};
+
+if (program.hdr) {
+
+  var startTime = new Date().getTime();
+  var brackets = 2;
+  var seperation = 8;
+  var centerIndex = Math.round(theta.shutterSpeed.length/2);
+	var center = theta.shutterSpeed[centerIndex];
+  var photoUris = [];
+
+  theta.connect();
+  theta.startSession()
+	   // Set to ISO priority with a low ISO
+  	.then(function() {
+  		return theta.camera.setOptions(theta.sessionId, {exposureProgram: theta.exposureProgram.ISO, iso: 100});
+		}).then(function() {
+  		return theta.camera.takePicture(theta.sessionId);
+		// Find out what the camera has selected as 'normal' shutter speed, this will be our ~
+		}).then(function(res) {
+      console.log('Estimating enter exposure');
+      photoUris.push(res.body.results.fileUri);
+  		return theta.camera.getMetadata(res.body.results.fileUri);
+    // Switch camera to full manual
+		}).then(function(res) {
+      console.log('Building expsure program...');
+
+      center = res.body.results.exif.ExposureTime;
+      centerIndex = theta.exposureIndex(center);
+
+      console.log('Center exposure: ' + center);
+      console.log('Center index: ' + centerIndex);
+
+      var bracketValues = [];
+      var shotFn = [];
+      var shotIndex = 0;
+
+      var p = function() {
+        var bracketValue = bracketValues[shotIndex];
+        shotIndex++;
+        return setShutter(bracketValue).then(function (res) {
+          console.log('Taking picture: '+ bracketValue);
+          return theta.camera.takePicture(theta.sessionId)
+            .then(function(res){
+              photoUris.push(res.body.results.fileUri);
+            });
+        });
+      };
+
+      for (var i=1; i<brackets+1; i++) {
+        var shutter = theta.shutterSpeed[centerIndex-seperation*i];
+        bracketValues.push(shutter);
+
+        shutter = theta.shutterSpeed[centerIndex+seperation*i];
+        bracketValues.push(shutter);
+      }
+
+      for (var i=0; i<bracketValues.length; i++) {
+        shotFn.push(p);
+      }
+
+      console.log(bracketValues);
+      return shotFn.reduce(q.when, q(0));
+
+		}).then(function() {
+      console.log('Downloading images...');
+      var proms = [];
+      photoUris.forEach(function(uri){
+        console.log('url:%s', uri);
+        proms.push(theta.camera.getImage(uri));
+      });
+      return q.all(proms);
+	  })
+		.then(function(images) {
+      console.log('Saving images...');
+      var idx = 0;
+      var proms = []
+      images.forEach(function(image) {
+        var prom = q.nfcall(fs.writeFile, path.join(program.out, program.file + '.' + idx +'.jpg'), image.body);
+        prom.then(function(){
+          console.log('file saved.');
+        });
+        proms.push(prom);
+        idx += 1;
+      });
+      theta.camera.closeSession(theta.sessionId);
+      return q.all(proms);
+  	})
+    .then(function(){
+      console.log('Merging to hdr...');
+      var globbed = path.join(program.out, program.file + '.*.jpg');
+      var outJpg = path.join(program.out, program.file + '.jpg');
+      var outTif = path.join(program.out, program.file + '.tif');
+
+      var logOutput = function(error, stdout, stderr) {
+        sys.print('stdout: ' + stdout);
+        sys.print('stderr: ' + stderr);
+        if (error !== null) {
+          console.log('exec error: ' + error);
+        }
+        var ellapsed = new Date().getTime() - startTime;
+        console.log('Completed in: %s seconds', ellapsed/1000);
+      };
+
+      var enfuseTif = exec('enfuse ' + globbed + ' --output ' + outTif, logOutput);
+      var enfuseJpg = exec('enfuse ' + globbed + ' --output ' + outJpg, logOutput);
+
+    })
+		.catch(function(err) {
+      console.log(err)
+    });
+}
+
+

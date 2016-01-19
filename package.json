@@ -3,7 +3,10 @@
   "description": "",
   "version": "0.0.0",
   "dependencies": {
-    "osc-client": "^1.1.0"
+    "commander": "^2.9.0",
+    "lodash": "^4.0.0",
+    "osc-client": "^1.1.0",
+    "q": "^1.4.1"
   },
   "scripts": {
     "lint": "eslint -f unix .",
